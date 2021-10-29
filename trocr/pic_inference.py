@@ -3,25 +3,28 @@ import deit
 import deit_models
 import torch
 import fairseq
+import os
 from fairseq import utils
 from fairseq_cli import generate
 from PIL import Image
 import torchvision.transforms as transforms
 
+from data_aug import build_data_aug
+
 
 def init(model_path, beam=5):
     model, cfg, task = fairseq.checkpoint_utils.load_model_ensemble_and_task(
         [model_path],
-        arg_overrides={"beam": beam, "task": "text_recognition", "data": "", "fp16": False})
+        arg_overrides={
+            "beam": beam,
+            "task": "text_recognition",
+            "fp16": False
+        })
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model[0].to(device)
 
-    img_transform = transforms.Compose([
-        transforms.Resize((384, 384), interpolation=3),
-        transforms.ToTensor(),
-        transforms.Normalize(0.5, 0.5)
-    ])
+    img_transform = build_data_aug(size=(384, 384), mode='valid', preprocess_background_langs=None)
 
     generator = task.build_generator(
         model, cfg.generation, extra_gen_cls_kwargs={'lm_model': None, 'lm_weight': None}
@@ -32,7 +35,7 @@ def init(model_path, beam=5):
     return model, cfg, task, generator, bpe, img_transform, device
 
 
-def preprocess(img_path, img_transform):
+def preprocess(img_path, img_transform, device):
     im = Image.open(img_path).convert('RGB').resize((384, 384))
     im = img_transform(im).unsqueeze(0).to(device).float()
 
@@ -43,8 +46,9 @@ def preprocess(img_path, img_transform):
     return sample
 
 
-def get_text(cfg, generator, model, sample, bpe):
-    decoder_output = task.inference_step(generator, model, sample, prefix_tokens=None, constraints=None)
+def get_text(cfg, generator, model, sample, bpe, prefix_tokens=None, bos_token=None):
+    decoder_output = generator.generate(model, sample, prefix_tokens=prefix_tokens,
+                                        constraints=None, bos_token=bos_token)
     decoder_output = decoder_output[0][0]       #top1
 
     hypo_tokens, hypo_str, alignment = utils.post_process_prediction(
@@ -59,7 +63,7 @@ def get_text(cfg, generator, model, sample, bpe):
 
     detok_hypo_str = bpe.decode(hypo_str)
 
-    return detok_hypo_str
+    return detok_hypo_str, decoder_output['score']
 
 
 if __name__ == '__main__':
@@ -69,11 +73,10 @@ if __name__ == '__main__':
 
     model, cfg, task, generator, bpe, img_transform, device = init(model_path, beam)
 
-    sample = preprocess(jpg_path, img_transform)
+    sample = preprocess(jpg_path, img_transform, device)
 
     text = get_text(cfg, generator, model, sample, bpe)
- 
+
     print(text)
 
     print('done')
-

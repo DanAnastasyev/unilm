@@ -4,7 +4,7 @@ import torch
 from fairseq import metrics, search, tokenizer, utils
 from fairseq.data import Dictionary
 from fairseq.tasks import LegacyFairseqTask, register_task
-from torchvision.transforms.transforms import ToTensor
+from fairseq.models.bart import BARTModel
 
 try:
     from .data import SROIETextRecognitionDataset, SyntheticTextRecognitionDataset
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 @register_task('text_recognition')
 class SROIETextRecognitionTask(LegacyFairseqTask):
-    
+
     @staticmethod
     def add_args(parser):
         parser.add_argument('data', metavar='DIR',
@@ -28,18 +28,20 @@ class SROIETextRecognitionTask(LegacyFairseqTask):
         parser.add_argument('--max-tgt-len', default=64, type=int,
                             help='the max bpe num of the output')
         parser.add_argument('--preprocess', default='ResizeNormalize', type=str,
-                            help='the image preprocess methods (ResizeNormalize|DeiT)')     
+                            help='the image preprocess methods (ResizeNormalize|DeiT)')
         parser.add_argument('--decoder-pretrained', default='roberta', type=str,
-                            help='seted to load the RoBERTa parameters to the decoder.')                                                   
+                            help='seted to load the RoBERTa parameters to the decoder.')
+        parser.add_argument('--decoder-pretrained-path', default=None, type=str)
+        parser.add_argument('--unfreeze-layers', type=int, nargs='+')
         # parser.add_argument('--resize-img-size', type=int,
-        #                     help='the output image size of h and w (h=w) of the image transform')   
+        #                     help='the output image size of h and w (h=w) of the image transform')
         parser.add_argument('--input-size', type=int, nargs='+', help='images input size')
         parser.add_argument('--text-recog-gen', action="store_true",
-                            help='if use the TextRecognitionGenerator')       
+                            help='if use the TextRecognitionGenerator')
         parser.add_argument('--crop-img-output-dir', type=str, default=None,
-                            help='the output dir for the crop images')   
+                            help='the output dir for the crop images')
         parser.add_argument('--data-type', type=str, default='SROIE',
-                            help='the dataset type used for the task (SROIE or Receipt53K)')        
+                            help='the dataset type used for the task (SROIE or Receipt53K)')
 
         # Augmentation parameters
         parser.add_argument('--color-jitter', type=float, default=0.4, metavar='PCT',
@@ -64,7 +66,11 @@ class SROIETextRecognitionTask(LegacyFairseqTask):
                             help='Random erase count (default: 1)')
         parser.add_argument('--resplit', action='store_true', default=False,
                             help='Do not random erase first (clean) augmentation split')
-                   
+
+        parser.add_argument('--preprocess-datasets', type=str, nargs='+')
+        parser.add_argument('--langs', type=str, nargs='+')
+        parser.add_argument('--datasets', type=str, nargs='+')
+        parser.add_argument('--use-additional-augs', default=False, action='store_true')
 
     @classmethod
     def setup_task(cls, args, **kwargs):
@@ -76,17 +82,27 @@ class SROIETextRecognitionTask(LegacyFairseqTask):
         super().__init__(args)
         self.args = args
         self.data_dir = args.data
-        if getattr(args, "decoder_pretrained", None) == 'unilm':
+        decoder_pretrained = getattr(args, "decoder_pretrained", None)
+        if decoder_pretrained == 'unilm':
             self.target_dict = Dictionary.load('unilm3.dict.txt')
+        elif decoder_pretrained == 'bart':
+            bart_dir = os.path.dirname(args.decoder_pretrained_path)
+            print(f'Loading BART from {bart_dir} to init dictionary')
+            bart_model = BARTModel.from_pretrained(
+                bart_dir, os.path.basename(args.decoder_pretrained_path), bpe='sentencepiece',
+                sentencepiece_model=os.path.join(bart_dir, 'sentence.bpe.model'),
+            )
+            self.bpe = bart_model.bpe
+            self.target_dict = bart_model.task.target_dictionary
         else:
             self.target_dict = Dictionary.load(os.path.join(args.data, 'gpt2.dict.txt'))
-        if getattr(args, "decoder_pretrained", None).startswith('roberta'):
+        if decoder_pretrained.startswith('roberta'):
             self.target_dict.add_symbol('<mask>') # to be consistent with roberta
         # roberta = torch.hub.load('pytorch/fairseq', 'roberta.base', verbose=False)
         # self.target_dict = roberta.task.dictionary
         print('| [label] load dictionary: {} types'.format(len(self.target_dict)))
-        self.bpe = self.build_bpe(args)        
-      
+        if not hasattr(self, 'bpe'):
+            self.bpe = self.build_bpe(args)
 
     def load_dataset(self, split, **kwargs):
         if not hasattr(self.args, 'input_size') or not self.args.input_size:
@@ -95,7 +111,7 @@ class SROIETextRecognitionTask(LegacyFairseqTask):
             temp = temp[temp.rfind('_') + 1:]
             assert 'x' not in temp, 'Please specify input_size when h != w.'
             self.args.input_size = int(temp)
-        input_size = self.args.input_size         
+        input_size = self.args.input_size
         if isinstance(input_size, list):
             if len(input_size) == 1:
                 input_size = (input_size[0], input_size[0])
@@ -104,25 +120,28 @@ class SROIETextRecognitionTask(LegacyFairseqTask):
         elif isinstance(input_size, int):
             input_size = (input_size, input_size)
         if self.args.preprocess == 'DA2':
-            tfm = build_data_aug(input_size, mode=split)
+            tfm = build_data_aug(input_size, mode=split, use_additional_augs=self.args.use_additional_augs,
+                                 preprocess_datasets=self.args.preprocess_datasets)
         else:
             raise Exception('Undeined image preprocess method.')
-        
+
         if self.args.data_type == 'SROIE':
             root_dir = os.path.join(self.data_dir, split)
-            self.datasets[split] = SROIETextRecognitionDataset(root_dir, tfm, self.bpe, self.target_dict, self.args.crop_img_output_dir)        
+            self.datasets[split] = SROIETextRecognitionDataset(root_dir, tfm, self.bpe, self.target_dict, self.args.crop_img_output_dir)
         elif self.args.data_type == 'STR':
             gt_path = os.path.join(self.data_dir, 'gt_{}.txt'.format(split))
-            self.datasets[split] = SyntheticTextRecognitionDataset(gt_path, tfm, self.bpe, self.target_dict)
+            self.datasets[split] = SyntheticTextRecognitionDataset(
+                gt_path, tfm, self.bpe, self.target_dict, self.args.langs, self.args.datasets
+            )
         else:
             raise Exception('Not defined dataset type: ' + self.args.data_type)
-    
+
     @property
     def source_dictionary(self):
         return None
 
     @property
-    def target_dictionary(self):        
+    def target_dictionary(self):
         return self.target_dict
 
     def build_generator(

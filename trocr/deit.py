@@ -52,7 +52,7 @@ class PatchEmbedForApe(nn.Module):
         # FIXME look at relaxing size constraints
         assert H == self.img_size[0] and W == self.img_size[1], \
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        
+
         x = self.proj(x)
         return x
 
@@ -65,10 +65,10 @@ class DistilledVisionTransformer(VisionTransformer):
         self.ape = ape
         self.mask_ratio = mask_ratio
 
-        self.dist_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))        
+        self.dist_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
         self.patch_embed = PatchEmbedForApe(
-                img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)        
-        num_patches = self.patch_embed.num_patches if not self.ape else 576        
+                img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        num_patches = self.patch_embed.num_patches if not self.ape else 576
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 2, self.embed_dim))
         self.head_dist = nn.Linear(self.embed_dim, self.num_classes) if self.num_classes > 0 else nn.Identity()
 
@@ -130,8 +130,8 @@ class AdaptedVisionTransformer(VisionTransformer):
         self.mask_ratio = mask_ratio
 
         self.patch_embed = PatchEmbedForApe(
-                img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)        
-        num_patches = self.patch_embed.num_patches if not self.ape else 576        
+                img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        num_patches = self.patch_embed.num_patches if not self.ape else 576
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, self.embed_dim))
 
     def forward_features(self, x):
@@ -159,7 +159,7 @@ class AdaptedVisionTransformer(VisionTransformer):
 
         cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)
-        
+
         if not self.ape:
             x = x + self.pos_embed
 
@@ -169,9 +169,9 @@ class AdaptedVisionTransformer(VisionTransformer):
         for blk in self.blocks:
             x = blk(x)
 
-        x = self.norm(x)        
+        x = self.norm(x)
         return x, input_embedding
-    
+
     def forward(self, x):
         x, input_embedding = self.forward_features(x)
         return x, input_embedding
@@ -308,7 +308,7 @@ def deit_base_distilled_patch16_custom_size(pretrained=False, img_size=384, **kw
             url="https://dl.fbaipublicfiles.com/deit/deit_base_distilled_patch16_384-d0272ac0.pth",
             map_location="cpu", check_hash=True
         )
-        # checkpoint['model']['pos_embed'] = checkpoint['model']['pos_embed'][:, :502, :]        
+        # checkpoint['model']['pos_embed'] = checkpoint['model']['pos_embed'][:, :502, :]
         # ape torch.Size([1, 578, 768]) from checkpoint, the shape in current model is torch.Size([1, 1026, 768]).
         model_seq_len = model.state_dict()['pos_embed'].shape[1]
         ckpt_seq_len = checkpoint['model']['pos_embed'].shape[1]
@@ -324,6 +324,14 @@ def deit_base_distilled_patch16_custom_size(pretrained=False, img_size=384, **kw
         model.load_state_dict(checkpoint["model"])
     return model
 
+
+@register_model
+def beit_small_patch16_384(pretrained=False, **kwargs):
+    model = AdaptedVisionTransformer(
+        img_size=384, patch_size=16, embed_dim=768, depth=6, num_heads=12, mlp_ratio=4, qkv_bias=False,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model.default_cfg = _cfg()
+    return model
 
 @register_model
 def beit_base_patch16_384(pretrained=False, **kwargs):

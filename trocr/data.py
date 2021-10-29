@@ -4,6 +4,7 @@ import os
 import random
 
 import torch
+from collections import Counter
 from fairseq.data import FairseqDataset, data_utils
 from natsort import natsorted
 from PIL import Image
@@ -12,18 +13,24 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 
+_LANG_TO_ID = {
+    'en': torch.tensor([250001]),
+    'ru': torch.tensor([250002]),
+}
+
+
 def default_collater(target_dict, samples, dataset=None):
     if not samples:
         return None
     if any([sample is None for sample in samples]):
         if not dataset:
             return None
-        len_batch = len(samples)        
+        len_batch = len(samples)
         while True:
             samples.append(dataset[random.choice(range(len(dataset)))])
             samples =list(filter (lambda x:x is not None, samples))
             if len(samples) == len_batch:
-                break        
+                break
     indices = []
 
     imgs = [] # bs, c, h , w
@@ -34,22 +41,21 @@ def default_collater(target_dict, samples, dataset=None):
         index = sample['id']
         indices.append(index)
 
-        
         imgs.append(sample['tfm_img'])
-        
+
         target_samples.append(sample['label_ids'].long())
         target_ntokens += len(sample['label_ids'])
 
     num_sentences = len(samples)
 
     target_batch = data_utils.collate_tokens(target_samples,
-                                            pad_idx=target_dict.pad(),
-                                            eos_idx=target_dict.eos(),
-                                            move_eos_to_beginning=False)
+                                             pad_idx=target_dict.pad(),
+                                             eos_idx=target_dict.eos(),
+                                             move_eos_to_beginning=False)
     rotate_batch = data_utils.collate_tokens(target_samples,
-                                            pad_idx=target_dict.pad(),
-                                            eos_idx=target_dict.eos(),
-                                            move_eos_to_beginning=True)                                               
+                                             pad_idx=target_dict.pad(),
+                                             eos_idx=target_dict.bos(),
+                                             move_eos_to_beginning=True)
 
     indices = torch.tensor(indices, dtype=torch.long)
     imgs = torch.stack(imgs, dim=0)
@@ -61,7 +67,7 @@ def default_collater(target_dict, samples, dataset=None):
             'prev_output_tokens': rotate_batch
         },
         'ntokens': target_ntokens,
-        'nsentences': num_sentences,            
+        'nsentences': num_sentences,
         'target': target_batch
     }
 
@@ -98,12 +104,12 @@ def SROIETask2(root_dir: str, bpe, target_dict, crop_img_output_dir=None):
     image_paths = natsorted(list(glob.glob(os.path.join(root_dir, '*.jpg'))))
     for jpg_path in tqdm(image_paths):
         im = Image.open(jpg_path).convert('RGB')
-        
+
         img_w, img_h = im.size
         img_id += 1
 
         txt_path = jpg_path.replace('.jpg', '.txt')
-        annotations = read_txt_and_tokenize(txt_path, bpe, target_dict) 
+        annotations = read_txt_and_tokenize(txt_path, bpe, target_dict)
         img_dict = {'file_name': jpg_path, 'width': img_w, 'height': img_h, 'image_id':img_id, 'annotations':annotations}
         data.append(img_dict)
 
@@ -126,7 +132,7 @@ def SROIETask2(root_dir: str, bpe, target_dict, crop_img_output_dir=None):
 class SROIETextRecognitionDataset(FairseqDataset):
     def __init__(self, root_dir, tfm, bpe_parser, target_dict, crop_img_output_dir=None):
         self.root_dir = root_dir
-        self.tfm = tfm            
+        self.tfm = tfm
         self.target_dict = target_dict
         # self.bpe_parser = bpe_parser
         self.ori_data, self.data = SROIETask2(root_dir, bpe_parser, target_dict, crop_img_output_dir)
@@ -136,7 +142,7 @@ class SROIETextRecognitionDataset(FairseqDataset):
 
     def __getitem__(self, idx):
         img_dict = self.data[idx]
-        
+
         image = img_dict['img']
         encoded_str = img_dict['encoded_str']
         input_ids = self.target_dict.encode_line(encoded_str, add_if_not_exist=False)
@@ -158,35 +164,60 @@ class SROIETextRecognitionDataset(FairseqDataset):
     def collater(self, samples):
         return default_collater(self.target_dict, samples)
 
-def STR(gt_path, bpe_parser):
+def STR(gt_path, bpe_parser, langs, datasets):
     root_dir = os.path.dirname(gt_path)
     data = []
     img_id = 0
     with open(gt_path, 'r') as fp:
         for line in tqdm(list(fp.readlines()), desc='Loading STR:'):
             line = line.rstrip()
-            temp = line.split('\t', 1)
-            img_file = temp[0]
-            text = temp[1]
+            fields = line.split('\t')
+            if len(fields) == 2:
+                img_file, text, lang, dataset = fields[0], fields[1], 'en', None
+            elif len(fields) == 3:
+                img_file, text, lang, dataset = fields[0], fields[1], fields[2], None
+            elif len(fields) == 4:
+                img_file, text, lang, dataset = fields
 
-            img_path = os.path.join(root_dir, 'image', img_file)  
+            img_path = os.path.join(root_dir, 'image', img_file)
             if not bpe_parser:
                 encoded_str = text
             else:
-                encoded_str = bpe_parser.encode(text)      
+                encoded_str = bpe_parser.encode(text)
 
-            data.append({'img_path': img_path, 'image_id':img_id, 'text':text, 'encoded_str':encoded_str})
+            if langs is not None and lang not in langs:
+                continue
+
+            if datasets is not None and dataset not in datasets:
+                continue
+
+            data.append({
+                'img_path': img_path,
+                'image_id': img_id,
+                'text': text,
+                'encoded_str': encoded_str,
+                'lang': lang,
+                'dataset': dataset,
+            })
             img_id += 1
 
     return data
 
 
 class SyntheticTextRecognitionDataset(FairseqDataset):
-    def __init__(self, gt_path, tfm, bpe_parser, target_dict):
+    def __init__(self, gt_path, tfm, bpe_parser, target_dict, langs, datasets):
         self.gt_path = gt_path
         self.tfm = tfm
         self.target_dict = target_dict
-        self.data = STR(gt_path, bpe_parser)
+        self.data = STR(gt_path, bpe_parser, langs, datasets)
+
+        datasets_counter = Counter()
+        for sample in self.data:
+            datasets_counter[(sample['lang'], sample['dataset'])] += 1
+
+        dataset_stat = '\n'.join(f'- lang = {lang}, dataset = {dataset}: {count}'
+                                 for (lang, dataset), count in datasets_counter.most_common())
+        logger.info('Dataset stat: %s\n%s', gt_path, dataset_stat)
 
     def __len__(self):
         return len(self.data)
@@ -197,8 +228,9 @@ class SyntheticTextRecognitionDataset(FairseqDataset):
         image = Image.open(img_dict['img_path']).convert('RGB')
         encoded_str = img_dict['encoded_str']
         input_ids = self.target_dict.encode_line(encoded_str, add_if_not_exist=False)
+        input_ids = torch.cat((_LANG_TO_ID[img_dict['lang']], input_ids))
 
-        tfm_img = self.tfm(image)  # h, w, c
+        tfm_img = self.tfm((image, img_dict['dataset']))  # h, w, c
         return {'id': idx, 'tfm_img': tfm_img, 'label_ids': input_ids}
 
     def size(self, idx):
