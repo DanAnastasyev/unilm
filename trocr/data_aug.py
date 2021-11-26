@@ -315,6 +315,26 @@ class Blot(NumpyAugmentation):
         return blot(image)
 
 
+class PaperColor(NumpyAugmentation):
+    def __init__(self):
+        post_phase = [
+            augraphy.BookBinding(radius_range=(1, 10), curve_intensity_range=(0, 20), p=0.25),
+            augraphy.Brightness(range=(0.5, 1.), p=0.25),
+            augraphy.Gamma(range=(0.3, 1.8), p=0.25),
+            augraphy.LightingGradient(p=0.25),
+        ]
+        self.pipeline = augraphy.AugraphyPipeline(ink_phase=[], paper_phase=[], post_phase=post_phase)
+
+    def forward(self, np_image):
+        if np_image.shape[0] >= 30 and np_image.shape[1] >= 30:
+            try:
+                np_image = self.pipeline.augment(np_image)['output']
+            except Exception as e:
+                logger.info(e)
+
+        return np_image
+
+
 # 0: InterpolationMode.NEAREST,
 # 2: InterpolationMode.BILINEAR,
 # 3: InterpolationMode.BICUBIC,
@@ -348,6 +368,7 @@ def build_data_aug(size, mode, preprocess_datasets, resnet=False, resizepad=True
                 Stretch(),
                 Perspective(),
                 Blot(),
+                PaperColor(),
             ])
 
         return transforms.Compose([

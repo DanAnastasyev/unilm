@@ -24,7 +24,7 @@ def init(model_path, beam=5):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model[0].to(device)
 
-    img_transform = build_data_aug(size=(384, 384), mode='valid', preprocess_background_langs=None)
+    img_transform = build_data_aug(size=(384, 384), mode='valid', preprocess_datasets=None)
 
     generator = task.build_generator(
         model, cfg.generation, extra_gen_cls_kwargs={'lm_model': None, 'lm_weight': None}

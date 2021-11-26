@@ -197,7 +197,7 @@ def STR(gt_path, bpe_parser, langs, datasets):
                 'text': text,
                 'encoded_str': encoded_str,
                 'lang': lang,
-                'dataset': dataset,
+                'dataset': dataset or lang,
             })
             img_id += 1
 
